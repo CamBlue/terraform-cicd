@@ -1,0 +1,26 @@
+﻿# Terraform state files — NEVER commit these
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+*.tfplan
+tfplan
+
+# Plan output files (temporary)
+plan_output.txt
+apply_output.txt
+
+# Terraform variable files that might contain secrets
+*.tfvars
+!example.tfvars
+
+# IAM setup files (credentials/policies, keep local only)
+iam-setup/
+
+# Editor files
+.vscode/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db

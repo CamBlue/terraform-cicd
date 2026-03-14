@@ -1,0 +1,157 @@
+# .github/workflows/terraform-apply.yml
+# =============================================================================
+# Terraform Apply Workflow
+#
+# Trigger: Push to main branch (includes PR merges).
+# Condition: Only runs if .tf or .tfvars files changed. If someone merges a
+#            PR that only touches documentation, Terraform does not run.
+#
+# What it does:
+#   1. Authenticates to AWS via OIDC
+#   2. Runs terraform init
+#   3. Runs terraform apply -auto-approve
+#   4. Posts the apply output summary to the GitHub Actions job summary page
+#   5. On failure, posts error details to the job summary
+#
+# Why -auto-approve?
+# The plan was already reviewed by the team in the PR comment. The merge
+# itself is the approval. In production teams, you often add a GitHub
+# Environment with required reviewers for an extra approval gate before apply.
+# =============================================================================
+
+name: "Terraform Apply"
+
+on:
+  push:
+    branches:
+      - main
+    # Only run if Terraform files changed.
+    # A docs-only merge will not trigger this workflow.
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - ".github/workflows/terraform-apply.yml"
+
+# Permissions required for OIDC authentication and job summary writes.
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform-apply:
+    name: "Terraform Apply"
+    runs-on: ubuntu-latest
+    env:
+      TF_INPUT: "false"
+
+    steps:
+      # -----------------------------------------------------------------------
+      # Step 1: Check out the code at the commit that was just pushed to main
+      # -----------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Step 2: Authenticate to AWS via OIDC
+      # Same OIDC role as the plan workflow — the role's trust policy
+      # allows both pull_request events and pushes to main.
+      # -----------------------------------------------------------------------
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::536300833332:role/github-actions-terraform
+          aws-region: us-east-2
+          role-session-name: github-actions-apply-${{ github.run_id }}
+
+      # -----------------------------------------------------------------------
+      # Step 3: Install Terraform (same version as plan workflow)
+      # Pinning to the exact same version ensures the apply sees the same
+      # behavior as the plan. A version mismatch can cause surprises.
+      # -----------------------------------------------------------------------
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+          terraform_wrapper: true
+
+      # -----------------------------------------------------------------------
+      # Step 4: Initialize Terraform
+      # This downloads the provider and connects to the S3 backend, just like
+      # the plan workflow. Each workflow run is a fresh environment — there is
+      # no state carried over between runs.
+      # -----------------------------------------------------------------------
+      - name: Terraform Init
+        id: init
+        run: terraform init -no-color
+
+      # -----------------------------------------------------------------------
+      # Step 5: Run Terraform Apply
+      # -auto-approve skips the interactive confirmation prompt.
+      # We capture output to both stdout/stderr and a file for the summary.
+      # The 2>&1 redirects stderr to stdout so error messages are captured too.
+      # -----------------------------------------------------------------------
+      - name: Terraform Apply
+        id: apply
+        run: |
+          terraform apply -auto-approve -no-color 2>&1 | tee apply_output.txt
+          echo "exitcode=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      # -----------------------------------------------------------------------
+      # Step 6: Post Apply Summary to GitHub Job Summary
+      # The GitHub Job Summary ($GITHUB_STEP_SUMMARY) is a markdown page
+      # visible on the workflow run page in the Actions tab. Unlike a PR
+      # comment, it persists with the run for historical reference.
+      # -----------------------------------------------------------------------
+      - name: Write Apply Summary
+        if: always()
+        run: |
+          # Safely read the apply output, defaulting to a message if not found
+          if [ -f apply_output.txt ]; then
+            APPLY_OUTPUT=$(cat apply_output.txt)
+          else
+            APPLY_OUTPUT="No output captured."
+          fi
+
+          # Truncate if extremely long
+          if [ ${#APPLY_OUTPUT} -gt 50000 ]; then
+            APPLY_OUTPUT="${APPLY_OUTPUT:0:50000}
+          ... (output truncated — see full log in the apply step above)"
+          fi
+
+          # Determine status
+          if [ "${{ steps.apply.outcome }}" == "success" ]; then
+            STATUS_ICON="✅"
+            STATUS_TEXT="Apply Succeeded"
+          else
+            STATUS_ICON="❌"
+            STATUS_TEXT="Apply FAILED"
+          fi
+
+          # Write the markdown summary
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # ${STATUS_ICON} Terraform Apply — ${STATUS_TEXT}
+
+          **Repository:** ${{ github.repository }}
+          **Branch:** main
+          **Commit:** [\`${GITHUB_SHA:0:7}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+          **Triggered by:** @${{ github.actor }}
+          **Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          ## Apply Output
+
+          \`\`\`hcl
+          ${APPLY_OUTPUT}
+          \`\`\`
+          EOF
+
+      # -----------------------------------------------------------------------
+      # Step 7: Fail the workflow if apply failed
+      # We used continue-on-error: true so the summary step could run.
+      # Now we fail the workflow so the commit status shows red.
+      # -----------------------------------------------------------------------
+      - name: Fail if Apply Failed
+        if: steps.apply.outcome == 'failure'
+        run: |
+          echo "::error::terraform apply failed! Check the job summary and Apply step logs."
+          exit 1
