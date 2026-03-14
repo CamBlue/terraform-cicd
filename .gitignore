@@ -1,4 +1,4 @@
-﻿# Terraform state files — NEVER commit these
+﻿# Terraform state files - NEVER commit these
 .terraform/
 .terraform.lock.hcl
 terraform.tfstate
@@ -24,3 +24,10 @@ iam-setup/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Python
+__pycache__/
+*.py[codz]
+.venv
+venv/
+env/
