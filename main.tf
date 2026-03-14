@@ -232,5 +232,7 @@ resource "aws_instance" "web" {
 
   tags = {
     Name = "${var.project_name}-web-server"
+    LastUpdated = "2026-03-13"
+    Pipeline    = "github-actions"
   }
 }
