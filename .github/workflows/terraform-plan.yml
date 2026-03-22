@@ -1,0 +1,116 @@
+﻿# .github/workflows/terraform-plan.yml
+name: "Terraform Plan"
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - ".github/workflows/terraform-plan.yml"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  terraform-plan:
+    name: "Terraform Plan"
+    runs-on: ubuntu-latest
+    env:
+      TF_INPUT: "false"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::536300833332:role/github-actions-terraform
+          aws-region: us-east-2
+          role-session-name: github-actions-plan-${{ github.run_id }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+          terraform_wrapper: true
+
+      - name: Terraform Init
+        id: init
+        run: terraform init -no-color
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -out=tfplan 2>&1 | tee plan_output.txt
+        continue-on-error: true
+
+      - name: Post Plan to PR
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const fs = require('fs');
+            let planOutput = 'No plan output captured.';
+            try {
+              planOutput = fs.readFileSync('plan_output.txt', 'utf8');
+            } catch (e) {}
+
+            // Truncate if too long for a PR comment (max ~65536 chars)
+            if (planOutput.length > 60000) {
+              planOutput = planOutput.substring(0, 60000) + '\n... (truncated)';
+            }
+
+            const outcome = '${{ steps.plan.outcome }}';
+            const icon = outcome === 'success' ? '✅' : '❌';
+
+            const body = `## ${icon} Terraform Plan
+
+            **Result:** ${outcome}
+
+            <details>
+            <summary>Show Plan Output</summary>
+
+            \`\`\`hcl
+            ${planOutput}
+            \`\`\`
+
+            </details>
+
+            *Commit:* \`${context.sha.substring(0, 7)}\` | *Workflow:* [Run #${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+
+            // Delete previous bot comments to keep the PR clean
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            for (const comment of comments) {
+              if (comment.body.includes('## ✅ Terraform Plan') || comment.body.includes('## ❌ Terraform Plan')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: comment.id,
+                });
+              }
+            }
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body,
+            });
+
+      - name: Fail if Plan Failed
+        if: steps.plan.outcome == 'failure'
+        run: |
+          echo "::error::Terraform plan failed! Check the PR comment for details."
+          exit 1
